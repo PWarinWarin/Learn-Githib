@@ -1,0 +1,209 @@
+# -*- coding: utf-8 -*-
+"""
+Place view on sheet with scope box constraint
+Author: Your Name
+Description: Place views on sheets using the same box center from a template viewport
+"""
+
+from Autodesk.Revit.DB import *
+from Autodesk.Revit.UI import *
+from Autodesk.Revit.UI.Selection import *
+from pyrevit import revit, forms
+from pyrevit.revit import db
+import clr
+
+doc = revit.doc
+uidoc = revit.uidoc
+
+class ViewPlacementDialog:
+    def __init__(self):
+        self.template_sheet = None
+        self.target_sheet = None
+        self.view_to_place = None
+        self.box_center = None
+    
+    def get_sheets(self):
+        """Get all sheets in the document"""
+        sheets = []
+        collector = FilteredElementCollector(doc).OfClass(ViewSheet)
+        for sheet in collector:
+            sheets.append(sheet)
+        return sorted(sheets, key=lambda x: x.SheetNumber)
+    
+    def get_sheet_display_name(self, sheet):
+        """Get display name for sheet in format: SheetNumber - SheetName"""
+        return u"{} - {}".format(sheet.SheetNumber, sheet.Name)
+    
+    def get_box_center_from_sheet(self, sheet):
+        """Get box center from first viewport on sheet"""
+        try:
+            viewport_ids = sheet.GetAllViewports()
+            if not viewport_ids or len(viewport_ids) == 0:
+                return None
+            
+            # Get first viewport (index 0)
+            viewport = doc.GetElement(viewport_ids[0])
+            
+            # Get box center from viewport
+            center = viewport.GetBoxCenter()
+            return center
+        except Exception as e:
+            print("Error getting box center: {}".format(str(e)))
+            return None
+    
+    def set_viewport_center(self, viewport, center_point):
+        """Set viewport center to box center"""
+        try:
+            if viewport and center_point:
+                viewport.SetBoxCenter(center_point)
+                return True
+            return False
+        except Exception as e:
+            print("Error setting viewport center: {}".format(str(e)))
+            return False
+    
+    def get_all_views(self):
+        """Get all floor plan and section views (not templates)"""
+        views = []
+        collector = FilteredElementCollector(doc).OfClass(View)
+        for view in collector:
+            # Filter out template views, sheets, and 3D views
+            try:
+                if (not view.IsTemplate and 
+                    view.ViewType in [ViewType.FloorPlan, ViewType.Section, 
+                                      ViewType.Elevation, ViewType.Detail] and
+                    not isinstance(view, ViewSheet)):
+                    views.append(view)
+            except:
+                pass
+        return sorted(views, key=lambda x: x.Name)
+    
+    def get_views_on_sheet(self, sheet):
+        """Get all views on sheet for checking duplicates"""
+        views = []
+        viewport_ids = sheet.GetAllViewports()
+        for viewport_id in viewport_ids:
+            viewport = doc.GetElement(viewport_id)
+            view = doc.GetElement(viewport.ViewId)
+            if view and not view.IsTemplate:
+                views.append(view)
+        return views
+    
+    def run(self):
+        """Run the main dialog"""
+        sheets = self.get_sheets()
+        if not sheets:
+            forms.alert(u"ไม่มี Sheet ในโปรเจค", u"ข้อมูล")
+            return
+        
+        all_views = self.get_all_views()
+        if not all_views:
+            forms.alert(u"ไม่มี View ที่สามารถวางได้", u"ข้อมูล")
+            return
+        
+        # Create display names
+        sheet_dict = {self.get_sheet_display_name(sheet): sheet for sheet in sheets}
+        sheet_names = list(sheet_dict.keys())
+        view_dict = {view.Name: view for view in all_views}
+        view_names = list(view_dict.keys())
+        
+        # Step 1: Select Template Sheet (เลือกครั้งเดียว)
+        selected_template_name = forms.SelectFromList.show(
+            sheet_names,
+            multiselect=False,
+            title=u"เลือกหน้าต้นแบบ (Template Sheet)",
+            width=600,
+            button_name=u"ถัดไป"
+        )
+        
+        if not selected_template_name:
+            forms.alert(u"ยกเลิกการทำงาน", u"ข้อมูล")
+            return
+        
+        template_sheet = sheet_dict[selected_template_name]
+        
+        # Get box center from template sheet
+        self.box_center = self.get_box_center_from_sheet(template_sheet)
+        if not self.box_center:
+            forms.alert(u"Sheet ต้นแบบนี้ไม่มี Viewport หรือไม่สามารถดึง Box Center ได้", u"ข้อผิดพลาด")
+            return
+        
+        # Loop for multiple placements
+        while True:
+            # Step 2 & 3: Select Target Sheet and View (อยู่ในลูป)
+            selected_target_name = forms.SelectFromList.show(
+                sheet_names,
+                multiselect=False,
+                title=u"เลือก Sheet ปลายทาง",
+                width=600,
+                button_name=u"ถัดไป"
+            )
+            
+            if not selected_target_name:
+                forms.notify(u"ปิดการทำงาน")
+                break
+            
+            target_sheet = sheet_dict[selected_target_name]
+            
+            # Select View to Place
+            selected_view_name = forms.SelectFromList.show(
+                view_names,
+                multiselect=False,
+                title=u"เลือก View ที่ต้องการวาง",
+                width=600,
+                button_name=u"วาง"
+            )
+            
+            if not selected_view_name:
+                forms.notify(u"ยกเลิกการวาง View")
+                continue
+            
+            view_to_place = view_dict[selected_view_name]
+            
+            # Check if view is already on target sheet
+            existing_views = self.get_views_on_sheet(target_sheet)
+            duplicate = False
+            for existing_view in existing_views:
+                if existing_view.Id == view_to_place.Id:
+                    forms.alert(u"View นี้วางอยู่บน Sheet แล้ว", u"ข้อมูล")
+                    duplicate = True
+                    break
+            
+            if duplicate:
+                continue
+            
+            # Place the view on the sheet
+            t = None
+            try:
+                t = Transaction(doc, "Place View on Sheet")
+                t.Start()
+                
+                # Create viewport at box center
+                viewport = Viewport.Create(doc, target_sheet.Id, view_to_place.Id, self.box_center)
+                
+                if viewport:
+                    # Set viewport center to match template box center
+                    self.set_viewport_center(viewport, self.box_center)
+                    
+                    t.Commit()
+                    forms.notify(
+                        u"✓ สำเร็จ! View '{}' ได้ถูกวางบน Sheet '{}' แล้ว".format(
+                            view_to_place.Name,
+                            target_sheet.SheetNumber
+                        )
+                    )
+                else:
+                    t.RollBack()
+                    forms.alert(u"ไม่สามารถสร้าง Viewport ได้", u"ข้อผิดพลาด")
+            
+            except Exception as e:
+                if t:
+                    try:
+                        t.RollBack()
+                    except:
+                        pass
+                forms.alert(u"เกิดข้อผิดพลาด: {}".format(str(e)), u"ข้อผิดพลาด")
+
+# Run the dialog
+dialog = ViewPlacementDialog()
+dialog.run()

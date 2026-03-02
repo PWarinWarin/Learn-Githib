@@ -1,0 +1,268 @@
+# -*- coding: utf-8 -*-
+"""
+Place view on sheet with scope box constraint
+Author: Your Name
+Description: Place views on sheets using the same box center from a template viewport
+"""
+
+from Autodesk.Revit.DB import *
+from Autodesk.Revit.UI import *
+from Autodesk.Revit.UI.Selection import *
+from pyrevit import revit, forms
+from pyrevit.revit import db
+import clr
+
+doc = revit.doc
+uidoc = revit.uidoc
+
+class ViewPlacementDialog:
+    def __init__(self):
+        self.template_sheet = None
+        self.target_sheet = None
+        self.view_to_place = None
+        self.box_center = None
+    
+    def get_sheets(self):
+        """Get all sheets in the document"""
+        sheets = []
+        collector = FilteredElementCollector(doc).OfClass(ViewSheet)
+        for sheet in collector:
+            sheets.append(sheet)
+        return sorted(sheets, key=lambda x: x.SheetNumber)
+    
+    def get_sheet_display_name(self, sheet):
+        """Get display name for sheet in format: SheetNumber - SheetName"""
+        return u"{} - {}".format(sheet.SheetNumber, sheet.Name)
+    
+    def get_box_center_from_sheet(self, sheet):
+        """Get box center from first viewport on sheet"""
+        try:
+            viewport_ids = sheet.GetAllViewports()
+            if not viewport_ids or len(viewport_ids) == 0:
+                return None
+            
+            # Get first viewport (index 0)
+            viewport = doc.GetElement(viewport_ids[0])
+            
+            # Get box center from viewport
+            center = viewport.GetBoxCenter()
+            return center
+        except Exception as e:
+            print("Error getting box center: {}".format(str(e)))
+            return None
+    
+    def set_viewport_center(self, viewport, center_point):
+        """Set viewport center to box center"""
+        try:
+            if viewport and center_point:
+                viewport.SetBoxCenter(center_point)
+                return True
+            return False
+        except Exception as e:
+            print("Error setting viewport center: {}".format(str(e)))
+            return False
+    
+    def get_all_views(self):
+        """Get all floor plan and section views (not templates)"""
+        views = []
+        collector = FilteredElementCollector(doc).OfClass(View)
+        for view in collector:
+            # Filter out template views, sheets, and 3D views
+            try:
+                if (not view.IsTemplate and 
+                    view.ViewType in [ViewType.FloorPlan, ViewType.Section, 
+                                      ViewType.Elevation, ViewType.Detail] and
+                    not isinstance(view, ViewSheet)):
+                    views.append(view)
+            except:
+                pass
+        return sorted(views, key=lambda x: x.Name)
+    
+    def get_views_on_sheet(self, sheet):
+        """Get all views on sheet for checking duplicates"""
+        views = []
+        viewport_ids = sheet.GetAllViewports()
+        for viewport_id in viewport_ids:
+            viewport = doc.GetElement(viewport_id)
+            view = doc.GetElement(viewport.ViewId)
+            if view and not view.IsTemplate:
+                views.append(view)
+        return views
+    
+    def show_selection_dialog(self):
+        """Show dialog with 3 selections at once"""
+        sheets = self.get_sheets()
+        if not sheets:
+            forms.alert(u"ไม่มี Sheet ในโปรเจค", u"ข้อมูล")
+            return None
+        
+        all_views = self.get_all_views()
+        if not all_views:
+            forms.alert(u"ไม่มี View ที่สามารถวางได้", u"ข้อมูล")
+            return None
+        
+        # Create display names
+        sheet_dict = {self.get_sheet_display_name(sheet): sheet for sheet in sheets}
+        sheet_names = list(sheet_dict.keys())
+        view_dict = {view.Name: view for view in all_views}
+        view_names = list(view_dict.keys())
+        
+        # Create custom selection form
+        from System.Windows.Forms import Form, Label, ComboBox, Button, DialogResult, FormStartPosition, ComboBoxStyle
+        from System.Drawing import Point, Size
+        
+        form = Form()
+        form.Text = u"วางชิ้นส่วนบน Sheet"
+        form.Width = 500
+        form.Height = 280
+        form.StartPosition = FormStartPosition.CenterScreen
+        
+        # Template Sheet Label
+        lbl1 = Label()
+        lbl1.Text = u"1. เลือกหน้าต้นแบบ (Template Sheet):"
+        lbl1.Location = Point(10, 15)
+        lbl1.AutoSize = True
+        form.Controls.Add(lbl1)
+        
+        # Template Sheet Combo
+        combo1 = ComboBox()
+        combo1.Location = Point(10, 40)
+        combo1.Width = 460
+        combo1.DropDownStyle = ComboBoxStyle.DropDownList
+        for name in sheet_names:
+            combo1.Items.Add(name)
+        if combo1.Items.Count > 0:
+            combo1.SelectedIndex = 0
+        form.Controls.Add(combo1)
+        
+        # Target Sheet Label
+        lbl2 = Label()
+        lbl2.Text = u"2. เลือก Sheet ปลายทาง:"
+        lbl2.Location = Point(10, 75)
+        lbl2.AutoSize = True
+        form.Controls.Add(lbl2)
+        
+        # Target Sheet Combo
+        combo2 = ComboBox()
+        combo2.Location = Point(10, 100)
+        combo2.Width = 460
+        combo2.DropDownStyle = ComboBoxStyle.DropDownList
+        for name in sheet_names:
+            combo2.Items.Add(name)
+        if combo2.Items.Count > 0:
+            combo2.SelectedIndex = 0
+        form.Controls.Add(combo2)
+        
+        # View Label
+        lbl3 = Label()
+        lbl3.Text = u"3. เลือก View ที่ต้องการวาง:"
+        lbl3.Location = Point(10, 135)
+        lbl3.AutoSize = True
+        form.Controls.Add(lbl3)
+        
+        # View Combo
+        combo3 = ComboBox()
+        combo3.Location = Point(10, 160)
+        combo3.Width = 460
+        combo3.DropDownStyle = ComboBoxStyle.DropDownList
+        for name in view_names:
+            combo3.Items.Add(name)
+        if combo3.Items.Count > 0:
+            combo3.SelectedIndex = 0
+        form.Controls.Add(combo3)
+        
+        # OK Button
+        btn_ok = Button()
+        btn_ok.Text = u"ตกลง"
+        btn_ok.Location = Point(310, 210)
+        btn_ok.Width = 80
+        btn_ok.DialogResult = DialogResult.OK
+        form.Controls.Add(btn_ok)
+        
+        # Cancel Button
+        btn_cancel = Button()
+        btn_cancel.Text = u"ยกเลิก"
+        btn_cancel.Location = Point(390, 210)
+        btn_cancel.Width = 80
+        btn_cancel.DialogResult = DialogResult.Cancel
+        form.Controls.Add(btn_cancel)
+        
+        # Accept button on Enter
+        form.AcceptButton = btn_ok
+        form.CancelButton = btn_cancel
+        
+        # Show dialog
+        result = form.ShowDialog()
+        
+        if result == DialogResult.OK:
+            template_sheet = sheet_dict[combo1.SelectedItem]
+            target_sheet = sheet_dict[combo2.SelectedItem]
+            view_to_place = view_dict[combo3.SelectedItem]
+            
+            return {
+                'template_sheet': template_sheet,
+                'target_sheet': target_sheet,
+                'view_to_place': view_to_place
+            }
+        else:
+            return None
+    
+    def run(self):
+        """Run the main dialog"""
+        # Show combined selection dialog
+        result = self.show_selection_dialog()
+        
+        if not result:
+            forms.alert(u"ยกเลิกการทำงาน", u"ข้อมูล")
+            return
+        
+        template_sheet = result['template_sheet']
+        target_sheet = result['target_sheet']
+        view_to_place = result['view_to_place']
+        
+        # Get box center from template sheet viewport
+        self.box_center = self.get_box_center_from_sheet(template_sheet)
+        if not self.box_center:
+            forms.alert(u"Sheet ต้นแบบนี้ไม่มี Viewport หรือไม่สามารถดึง Box Center ได้", u"ข้อผิดพลาด")
+            return
+        
+        # Check if view is already on target sheet
+        existing_views = self.get_views_on_sheet(target_sheet)
+        for existing_view in existing_views:
+            if existing_view.Id == view_to_place.Id:
+                forms.alert(u"View นี้วางอยู่บน Sheet แล้ว", u"ข้อมูล")
+                return
+        
+        # Place the view on the sheet
+        t = None
+        try:
+            t = Transaction(doc, "Place View on Sheet")
+            t.Start()
+            
+            # Create viewport at box center
+            viewport = Viewport.Create(doc, target_sheet.Id, view_to_place.Id, self.box_center)
+            
+            if viewport:
+                # Set viewport center to match template box center
+                self.set_viewport_center(viewport, self.box_center)
+                
+                t.Commit()
+                forms.alert(
+                    u"สำเร็จ! View '{}' ได้ถูกวางบน Sheet '{}' แล้ว".format(
+                        view_to_place.Name,
+                        target_sheet.SheetNumber
+                    ),
+                    u"สำเร็จ"
+                )
+            else:
+                t.RollBack()
+                forms.alert(u"ไม่สามารถสร้าง Viewport ได้", u"ข้อผิดพลาด")
+        
+        except Exception as e:
+            if t and t.IsActive:
+                t.RollBack()
+            forms.alert(u"เกิดข้อผิดพลาด: {}".format(str(e)), u"ข้อผิดพลาด")
+
+# Run the dialog
+dialog = ViewPlacementDialog()
+dialog.run()
